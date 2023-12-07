@@ -1,89 +1,163 @@
-from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QComboBox, QMessageBox, QGroupBox, QLabel
-from PyQt5.QtCore import Qt, QTimer
-from PyQt5.QtGui import QPainter, QColor
+from PyQt6.QtWidgets import (
+    QApplication,
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QPushButton,
+    QComboBox,
+    QMessageBox,
+    QGroupBox,
+    QLabel,
+)
+from PyQt6.QtCore import Qt, QTimer
+from pyqtgraph import PlotWidget, mkPen
 import serial
 import serial.tools.list_ports
 
-class Switch(QPushButton):
-    def __init__(self, parent = None):
-        super().__init__(parent)
-        self.setCheckable(True)
-        self.setMinimumWidth(66)
-        self.setMinimumHeight(22)
 
-    def paintEvent(self, event):
-        label = "Entrenamiento" if self.isChecked() else "Evaluación"
-        bg_color = Qt.green if self.isChecked() else Qt.red
-
-        painter = QPainter(self)
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor(bg_color))
-
-        painter.drawRect(0, 0, self.width(), self.height())
-        painter.setBrush(QColor("#ffffff"))
-        painter.drawRect(13 if self.isChecked() else 1, 1, 28, 28)
-        painter.drawText(24 if self.isChecked() else 38, 20, label)
-
-class MyApp(QWidget):
+class SerialApp(QWidget):
     def __init__(self):
         super().__init__()
 
+        self.training_mode = True
         self.ser = None
 
-        self.device_combobox = QComboBox()
-        self.device_combobox.addItems([port.device for port in serial.tools.list_ports.comports()])
+        self.pressure_values = []
+        self.frequency_values = []
+        self.time_press_values = []
+        self.time_freq_values = []
+        self.i = 0
 
-        self.baudrate_combobox = QComboBox()
-        self.baudrate_combobox.addItems(['9600', '14400', '19200', '38400', '57600', '115200'])
+        self.initUI()
 
-        self.connect_button = QPushButton('Connect')
-        self.connect_button.clicked.connect(self.connect_to_device)
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.read_serial)
+        self.timer.start(50)
 
-        connection_group = QGroupBox("Conexión")
-        connection_layout = QVBoxLayout()
-        connection_layout.addWidget(self.device_combobox)
-        connection_layout.addWidget(self.baudrate_combobox)
-        connection_layout.addWidget(self.connect_button)
-        connection_group.setLayout(connection_layout)
+    def initUI(self):
+        self.setWindowTitle("Simulador de RCP Neonatal")
 
-        self.mode_switch = Switch()
+        main_layout = QVBoxLayout()
+        left_layout = QVBoxLayout()
+
+        # Serial group
+        serial_group = QGroupBox("Conexiones")
+        serial_layout = QHBoxLayout()
+
+        self.port_combo = QComboBox()
+        self.port_combo.addItems(
+            [port.device for port in serial.tools.list_ports.comports()]
+        )
+
+        self.baudrate_combo = QComboBox()
+        self.baudrate_combo.addItems(
+            ["9600", "14400", "19200", "38400", "57600", "115200"]
+        )
+
+        self.connect_button = QPushButton("Conectar")
+        self.connect_button.clicked.connect(self.connect_serial)
+
+        serial_layout.addWidget(self.port_combo)
+        serial_layout.addWidget(self.baudrate_combo)
+        serial_layout.addWidget(self.connect_button)
+
+        serial_group.setLayout(serial_layout)
+
+        # Mode group
         mode_group = QGroupBox("Modo")
         mode_layout = QVBoxLayout()
-        mode_layout.addWidget(self.mode_switch)
+
+        simulation_group = QGroupBox("Simulación")
+        simulation_layout = QVBoxLayout()
+        simulation_group.setLayout(simulation_layout)
+
+
+        self.mode_button = QPushButton("Cambiar a modo de evaluación")
+        self.mode_button.clicked.connect(self.switch_mode)
+
+        self.mode_label = QLabel("Modo actual: Entrenamiento")
+
+        mode_layout.addWidget(self.mode_button)
+        mode_layout.addWidget(self.mode_label)
+
         mode_group.setLayout(mode_layout)
 
-        layout = QVBoxLayout()
-        layout.addWidget(connection_group)
-        layout.addWidget(mode_group)
+        self.pressure_plot = PlotWidget()
+        self.pressure_plot.setTitle("Presión")
+        self.pressure_plot.setLabel('left', 'Presión [cm]')
+        simulation_layout.addWidget(self.pressure_plot)
 
-        self.setLayout(layout)
-        self.resize(1280, 720)
+        self.frequency_plot = PlotWidget()
+        self.frequency_plot.setTitle("Frecuencia")
+        self.frequency_plot.setLabel('left', 'Frecuencia [bpm]') 
+        simulation_layout.addWidget(self.frequency_plot)
 
-        self.read_timer = QTimer()
-        self.read_timer.timeout.connect(self.read_from_device)
+        simulation_group.setLayout(simulation_layout)
 
-    def connect_to_device(self):
-        if self.connect_button.text() == "Connect":
-            device = self.device_combobox.currentText()
-            baudrate = int(self.baudrate_combobox.currentText())
-            self.ser = serial.Serial(device, baudrate)
-            self.connect_button.setText("Disconnect")
-            QMessageBox.information(self, "Connection status", f"Connected to {device} at {baudrate} baudrate")
-            self.read_timer.start(80)
+        main_layout.addLayout(left_layout)
+        main_layout.addWidget(serial_group)
+        main_layout.addWidget(mode_group)
+        main_layout.addWidget(simulation_group)
+
+        self.setLayout(main_layout)
+
+    def connect_serial(self):
+        if self.connect_button.text() == "Conectar":
+            try:
+                self.ser = serial.Serial(
+                    self.port_combo.currentText(),
+                    int(self.baudrate_combo.currentText()),
+                )
+                self.connect_button.setText("Desconectar")
+                QMessageBox.information(self, "Serial", "Conectado al puerto serie")
+            except Exception as e:
+                QMessageBox.critical(self, "Serial", f"Fallo al intentar conectar: {e}")
         else:
-            if self.ser:
-                self.read_timer.stop()
-                self.ser.close()
-                self.ser = None
-            self.connect_button.setText("Connect")
-            QMessageBox.information(self, "Connection status", "Disconnected")
+            self.ser.close()
+            self.ser = None
+            self.connect_button.setText("Conectar")
+            QMessageBox.information(self, "Serial", "Desconectado del puerto serie")
 
-    def read_from_device(self):
-        if self.ser:
-            line = self.ser.readline().decode().strip()
+    def read_serial(self):
+        if self.ser is not None and self.ser.in_waiting > 0:
+            self.i = self.i+1
+            line = self.ser.readline().decode("utf-8").strip()
             print(line)
+            if line.startswith('P'):
+                value = float(line[1:])  
+                if self.training_mode:
+                    self.pressure_values.append(value/10)
+                    self.time_press_values.append(self.i)
+                    self.pressure_plot.plot(self.time_press_values, self.pressure_values, pen=mkPen('r', width=3))
+            elif line.startswith('B'):
+                value = float(line[1:])  
+                if self.training_mode:
+                    self.frequency_values.append(value)
+                    self.time_freq_values.append(self.i)
+                    self.frequency_plot.plot(self.time_freq_values, self.frequency_values, pen=mkPen('r', width=3))
 
-app = QApplication([])
-window = MyApp()
-window.show()
-app.exec_()
+    def switch_mode(self):
+        self.training_mode = not self.training_mode
+        self.mode_button.setText(
+            "Cambiar a modo de entrenamiento"
+            if not self.training_mode
+            else "Cambiar a modo de evaluación"
+        )
+        self.mode_label.setText(
+            f'Modo actual: {"Entrenamiento" if self.training_mode else "Evaluación"}'
+        )
+        if self.training_mode:
+            self.frequency_plot.show()
+            self.pressure_plot.show()
+            self.i = 0
+        else:
+            self.frequency_plot.hide()
+            self.pressure_plot.hide()
+            self.i = 0
+
+
+if __name__ == "__main__":
+    app = QApplication([])
+    ex = SerialApp()
+    ex.show()
+    app.exec()
